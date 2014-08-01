@@ -4,7 +4,7 @@ use strict;
 use warnings;
 
 use vars qw($VERSION @ISA);
-$VERSION = '0.03';
+$VERSION = '0.04';
 
 #--------------------------------------------------------------------------
 
@@ -77,6 +77,8 @@ a valid page is returned, the following fields are returned via the book hash:
 The book_link, image_link and thumb_link all refer back to the Waterstones
 website.
 
+=back
+
 =cut
 
 sub search {
@@ -100,31 +102,15 @@ sub search {
     return $self->handler("The Waterstones website appears to be unavailable.")
 	    if($@ || !$mech->success() || !$mech->content());
 
-    my $content = $mech->content;
-    my ($link,$thumb) = $content =~ m!<a href="([^"]+)">\s*<img src="([^"]+$ean.jpg)"!si;
-
 #print STDERR "\n# search=[".SEARCH."$ean]\n";
-#print STDERR "\n# link=[$link]\n";
-#print STDERR "\n# thumb=[$thumb]\n";
-#print STDERR "\n# content1=[\n$content\n]\n";
 #print STDERR "\n# is_html=".$mech->is_html().", content type=".$mech->content_type()."\n";
 #print STDERR "\n# dump headers=".$mech->dump_headers."\n";
-
-	return $self->handler("Failed to find that book on the Waterstones website. [$isbn]")
-		if(!$link || $content =~ m!Sorry, there are no results for!si);
-
-    $link =~ s/&amp;/&/g;
-#print STDERR "\n# link3=[$link]\n";
-
-    eval { $mech->get( $link ) };
-    return $self->handler("The Waterstones website appears to be unavailable.")
-	    if($@ || !$mech->success() || !$mech->content());
 
 	# The Book page
     my $html = $mech->content();
 
 	return $self->handler("Failed to find that book on the Waterstones website. [$isbn]")
-		if($html =~ m!Sorry, there are no results for!si);
+		if($html =~ m|<strong>Sorry!</strong> We did not find any results for|si);
     
     $html =~ s/&amp;/&/g;
 #print STDERR "\n# content2=[\n$html\n]\n";
@@ -134,7 +120,7 @@ sub search {
     ($data->{author})           = $html =~ m!<p class="byAuthor">\s*by\s*<a[^>]+>([^<]+)</a>!si;
     ($data->{binding},$data->{pages})          
                                 = $html =~ m!<td headers="productFormat">([^<]+)\s+(\d+)\s+pages</td>!si;
-    ($data->{description})      = $html =~ m!<h2>Synopsis</h2>\s*<p>([^<]+)!si;
+    ($data->{description})      = $html =~ m!<div class="large-product-pane left">(.*?)</div>!si;
     ($data->{pubdate})          = $html =~ m!<p><strong>Published</strong><BR />([^<]+)</p>!si;
     ($data->{publisher})        = $html =~ m!<p><strong>Publisher</strong><BR />([^<]+)</p>!si;
     ($data->{isbn13})           = $html =~ m!<p><strong>ISBN</strong><BR />([^<]+)</p>!si;
@@ -146,12 +132,17 @@ sub search {
 	return $self->handler("Could not extract data from the Waterstones result page. [$isbn]")
 		unless(defined $data);
 
-    for(qw(author publisher description)) {
+    for(qw(author publisher description title)) {
         $data->{$_} =~ s/&#0?39;/'/g    if($data->{$_});
     }
 
-    $data->{isbn10}     = $self->convert_to_isbn10($ean);
-    $data->{thumb}      = $thumb || $data->{image};
+    $data->{isbn10} = $self->convert_to_isbn10($ean);
+    $data->{thumb}  = $data->{image};
+    $data->{thumb}  =~ s!/images/nbd/[lms]/!/images/nbd/s/!;
+    $data->{image}  =~ s!/images/nbd/[lms]/!/images/nbd/l/!;
+    $data->{title}  =~ s!\s*\($data->{binding}\)\s*!!;
+
+    $data->{description}    =~ s!<[^>]+>!!;
 
 #use Data::Dumper;
 #print STDERR "\n# data=" . Dumper($data);
@@ -174,7 +165,7 @@ sub search {
 		'isbn'			=> $data->{isbn13},
 		'author'		=> $data->{author},
 		'title'			=> $data->{title},
-		'book_link'		=> $url,
+		'book_link'		=> "$url",
 		'image_link'	=> $data->{image},
 		'thumb_link'	=> $data->{thumb},
 		'description'	=> $data->{description},
@@ -182,6 +173,7 @@ sub search {
 		'publisher'		=> $data->{publisher},
 		'binding'	    => $data->{binding},
 		'pages'		    => $data->{pages},
+        'html'          => $html
 	};
 
 #use Data::Dumper;
@@ -190,79 +182,6 @@ sub search {
     $self->book($bk);
 	$self->found(1);
 	return $self->book;
-}
-
-=item C<convert_to_ean13()>
-
-Given a 10/13 character ISBN, this function will return the correct 13 digit
-ISBN, also known as EAN13.
-
-=item C<convert_to_isbn10()>
-
-Given a 10/13 character ISBN, this function will return the correct 10 digit 
-ISBN.
-
-=back
-
-=cut
-
-sub convert_to_ean13 {
-	my $self = shift;
-    my $isbn = shift;
-    my $prefix;
-
-    return  unless(length $isbn == 10 || length $isbn == 13);
-
-    if(length $isbn == 13) {
-        return  if($isbn !~ /^(978|979)(\d{10})$/);
-        ($prefix,$isbn) = ($1,$2);
-    } else {
-        return  if($isbn !~ /^(\d{10}|\d{9}X)$/);
-        $prefix = '978';
-    }
-
-    my $isbn13 = '978' . $isbn;
-    chop($isbn13);
-    my @isbn = split(//,$isbn13);
-    my ($lsum,$hsum) = (0,0);
-    while(@isbn) {
-        $hsum += shift @isbn;
-        $lsum += shift @isbn;
-    }
-
-    my $csum = ($lsum * 3) + $hsum;
-    $csum %= 10;
-    $csum = 10 - $csum  if($csum != 0);
-
-    return $isbn13 . $csum;
-}
-
-sub convert_to_isbn10 {
-	my $self = shift;
-    my $ean  = shift;
-    my ($isbn,$isbn10);
-
-    return  unless(length $ean == 10 || length $ean == 13);
-
-    if(length $ean == 13) {
-        return  if($ean !~ /^(?:978|979)(\d{9})\d$/);
-        ($isbn,$isbn10) = ($1,$1);
-    } else {
-        return  if($ean !~ /^(\d{9})[\dX]$/);
-        ($isbn,$isbn10) = ($1,$1);
-    }
-
-	return  if($isbn < 0 or $isbn > 999999999);
-
-	my ($csum, $pos, $digit) = (0, 0, 0);
-    for ($pos = 9; $pos > 0; $pos--) {
-        $digit = $isbn % 10;
-        $isbn /= 10;             # Decimal shift ISBN for next time 
-        $csum += ($pos * $digit);
-    }
-    $csum %= 11;
-    $csum = 'X'   if ($csum == 10);
-    return $isbn10 . $csum;
 }
 
 1;
@@ -301,7 +220,7 @@ be forthcoming, please feel free to (politely) remind me.
 
 =head1 COPYRIGHT & LICENSE
 
-  Copyright (C) 2010-2013 Barbie for Miss Barbell Productions
+  Copyright (C) 2010-2014 Barbie for Miss Barbell Productions
 
   This module is free software; you can redistribute it and/or
   modify it under the Artistic Licence v2.
